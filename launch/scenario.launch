@@ -1,0 +1,14 @@
+<launch>
+    <arg name="scenario_id" default="scenario_c"/>
+    <arg name="scenario_config" default="$(find exsce_ros)/config/scenarios/$(arg scenario_id).yaml"/>
+
+    <group ns="scenario">
+        <rosparam command="load" file="$(arg scenario_config)" />
+    </group>
+
+    <!-- Launch scenario based on specification in param server -->
+    <node pkg="exsce_ros" type="launch_scenario" name="launch_scenario" output="screen"/>
+
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find exsce_ros)/config/rviz/multi.rviz"/>
+
+</launch>

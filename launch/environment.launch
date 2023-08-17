@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+
+<launch>
+    
+    <!-- GAZEBO SETUP ARGUMENTS -->
+    <arg name="gui" default="true"/>
+    <arg name="debug" default="false"/>
+    <arg name="world_name" default="brsu_building_c_with_doors"/>
+    <arg name="world_dir" default="$(find floorplan-dsl-environments)/worlds"/>
+
+
+    <env name="GAZEBO_MODEL_PATH" value="$(find floorplan-dsl-environments)/models:$(find floorplan-dsl-environments)/worlds:$(find pal_gazebo_worlds)/models:$(optenv GAZEBO_MODEL_PATH)"/>
+
+    <env name="LC_NUMERIC" value="C" />
+
+    <!-- launch gazebo with empty world -->
+    <include file="$(find gazebo_ros)/launch/empty_world.launch">
+        <arg name="world_name" value="$(arg world_dir)/$(arg world_name).world"/>
+        <arg name="gui" value="$(arg gui)"/>
+        <arg name="debug" value="$(arg debug)"/>
+        <arg name="extra_gazebo_args" value="--lockstep"/>
+    </include>
+
+</launch>

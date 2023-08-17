@@ -1,0 +1,205 @@
+#! /usr/bin/env python3
+import os
+import shutil
+
+import yaml
+
+import rospy
+import roslaunch
+from std_msgs.msg import Bool
+
+from exsce_ros.utils import get_package_path, get_file_path, load_yaml, write_yaml_file
+
+
+class ScenarioLauncher:
+    def __init__(self) -> None:
+        self.mission_done = False
+        rospy.Subscriber("scenario/test_run/finished", Bool, self.mission_done_cb)
+
+        uuid = roslaunch.rlutil.get_or_generate_uuid(None, False)
+        roslaunch.configure_logging(uuid)
+        self.launch = roslaunch.scriptapi.ROSLaunch()
+
+        self.launch_files = list()
+
+        # Add gazebo world launcher
+        self.add_environment_launcher()
+
+        # Add robot launchers
+        self.add_robot_launchers()
+
+        self.launch.parent = roslaunch.parent.ROSLaunchParent(
+            uuid, self.launch_files, sigint_timeout=30
+        )
+
+    def start(self):
+        rospy.logdebug("Started!")
+        self.launch.start()
+
+        rospy.sleep(5)
+
+        # Start another node
+        node = roslaunch.core.Node("exsce_ros", "spawn_robot", output="screen")
+        self.process = self.launch.launch(node)
+
+        self.launch.spin()
+
+    def shutdown(self):
+        rospy.loginfo("Shutting down!")
+        self.launch.stop()
+        self.process.stop()
+
+    def mission_done_cb(self, msg):
+        self.mission_done = msg.data
+
+        if self.mission_done:
+            rospy.loginfo("Mission done")
+            self.shutdown()
+
+    def add_environment_launcher(self):
+        env_pkg = rospy.get_param("/scenario/environment/models/gazebo_world/pkg")
+        env_name = rospy.get_param(
+            "/scenario/environment/models/gazebo_world/model_name"
+        )
+        env_rel_path = rospy.get_param(
+            "/scenario/environment/models/gazebo_world/relative_path"
+        )
+        env_path = os.path.join(get_package_path(env_pkg, env_rel_path))
+        self.launch_files.append(
+            (
+                roslaunch.rlutil.resolve_launch_arguments(
+                    ["exsce_ros", "environment.launch"]
+                )[0],
+                ["world_dir:={}".format(env_path), "world_name:={}".format(env_name)],
+            )
+        )
+
+    def add_robot_launchers(self):
+        raise NotImplementedError
+
+
+class PALScenarioLauncher(ScenarioLauncher):
+    PAL_MAP_TRANSFORMATION = """
+<MapTransformationConfig scale="1.0">
+  <location3D>
+    <translation x="0"  y="0"  z="0" ></translation>
+    <matrixRot rodrigues_x="0"  rodrigues_y="0"  rodrigues_z="0" ></matrixRot>
+    <rotationRollPitchYaw roll="0"  pitch="0"  yaw="0" ></rotationRollPitchYaw>
+  </location3D>
+</MapTransformationConfig>
+
+"""
+
+    def __init__(self) -> None:
+        self.write_pal_env_files()
+        super().__init__()
+
+    def get_map_path(self):
+        map_pkg = rospy.get_param("/scenario/environment/models/map/pkg")
+        map_name = rospy.get_param("/scenario/environment/models/map/map_name")
+        map_rel_path = rospy.get_param("/scenario/environment/models/map/relative_path")
+        map_path = os.path.join(get_package_path(map_pkg, map_rel_path), map_name)
+        return map_path
+
+    def add_robot_launchers(self):
+        map_path = self.get_map_path()
+
+        robots = rospy.get_param("/scenario/robots")
+        for robot in robots:
+            robot_id = robot.get("robot_id")
+            robot_name = robot.get("robot_namespace")
+            robot_type = robot.get("robot_type")
+            robot_cfg_path = get_package_path(
+                "sesame_navigation_cfg_{}".format(robot_type)
+            )
+
+            cfg = robot.get("configuration", {"hardware": {"base_type": "pmb2"}})
+            hw_cfg = cfg.get("hardware")
+
+            base_type = hw_cfg.get("base_type")
+
+            robot_launch = [
+                "sesame_navigation_cfg_common",
+                "launch_robot_navigation.launch",
+            ]
+            args = [
+                "robot_name:={}".format(robot_id),
+                "map:={}".format(map_path),
+                "navigation_cfg:={}".format(robot_cfg_path),
+                "base_type:={}".format(base_type),
+            ]
+
+            robot_launch.extend(args)
+            roslaunch_file = roslaunch.rlutil.resolve_launch_arguments(robot_launch)
+
+            self.launch_files.append((roslaunch_file[0], args))
+
+            # Robot start pose for simulation
+            start_pose = rospy.get_param(
+                "/scenario/environment/robots/{}/start_pose".format(robot_id)
+            )
+            self.write_pal_pose_file(robot_name, **start_pose)
+
+    def write_pal_env_files(self):
+        env = rospy.get_param("/scenario/environment/models/map")
+        pkg = env.get("pkg")
+        subfolder = os.path.join(env.get("relative_path"), env.get("map_name"))
+
+        file_path = get_file_path("transformation.xml", pkg, subfolder)
+        with open(file_path, "w") as outfile:
+            outfile.write(self.PAL_MAP_TRANSFORMATION)
+
+        mmap = {"numberOfSubMaps": 1}
+        file_path = get_file_path("mmap.yaml", pkg, subfolder)
+        with open(file_path, "w") as outfile:
+            yaml.dump(mmap, outfile, default_flow_style=False)
+
+        # Occupancy grid
+        source = get_file_path("{}.pgm".format(env.get("map_name")), pkg, subfolder)
+        dest = get_file_path("submap_0.pgm", pkg, subfolder)
+
+        if not os.path.exists(dest):
+            shutil.copyfile(source, dest)
+
+        # Occupancy grid metadata
+        source = get_file_path("{}.yaml".format(env.get("map_name")), pkg, subfolder)
+        dest = get_file_path("map.yaml", pkg, subfolder)
+
+        if not os.path.exists(dest):
+            map_metadata = load_yaml(source)
+            map_metadata["image"] = "submap_0.pgm"
+            write_yaml_file(dest, map_metadata)
+
+    def write_pal_pose_file(self, robot_name, x, y, yaw=0.0, **_):
+        data = {
+            "initial_cov_aa": 0.02,
+            "initial_cov_xx": 0.01,
+            "initial_cov_yy": 0.01,
+            "initial_pose_a": yaw,
+            "initial_pose_x": x,
+            "initial_pose_y": y,
+        }
+
+        for k, v in data.items():
+            rospy.set_param("/{}/amcl/{}".format(robot_name, k), v)
+
+        file_name = "{}_pose.yaml".format(robot_name)
+        file_path = os.path.join(os.path.expanduser("~/.pal"))
+
+        if not os.path.exists(file_path):
+            print("Creating directory at ~/.pal")
+            os.makedirs(file_path)
+
+        with open(os.path.join(file_path, file_name), "w") as outfile:
+            yaml.dump(data, outfile, default_flow_style=False)
+
+
+if __name__ == "__main__":
+    rospy.init_node("scenario_setup")
+    launcher = PALScenarioLauncher()
+    try:
+        launcher.start()
+    except rospy.ROSInterruptException:
+        rospy.logerr("Program interrupted before completion")
+    finally:
+        launcher.shutdown()

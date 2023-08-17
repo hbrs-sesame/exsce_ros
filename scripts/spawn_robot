@@ -1,0 +1,51 @@
+#! /usr/bin/env python3
+import sys
+
+import rospy
+
+from gazebo_msgs.srv import SpawnModel, SpawnModelRequest
+from geometry_msgs.msg import Point, Quaternion
+from tf.transformations import quaternion_from_euler
+
+
+def spawn_robots():
+    spawn_model_server = rospy.ServiceProxy("/gazebo/spawn_urdf_model", SpawnModel)
+    spawn_model_server.wait_for_service()
+
+    robots = rospy.get_param("/scenario/robots")
+
+    for robot in robots:
+        robot_id = robot.get("robot_id")
+        robot_name = robot.get("robot_namespace")
+        request = SpawnModelRequest()
+
+        start_pose = rospy.get_param(
+            "/scenario/environment/robots/{}/start_pose".format(robot_id)
+        )
+
+        request.model_name = robot_id
+        request.model_xml = rospy.get_param("{}/robot_description".format(robot_name))
+        request.robot_namespace = robot_name
+        request.initial_pose.position = Point(
+            start_pose.get("x"), start_pose.get("y"), robot.get("z", 0.0)
+        )
+
+        orientation = [
+            start_pose.get("roll", 0.0),
+            start_pose.get("pitch", 0.0),
+            start_pose.get("yaw", 0.0),
+        ]
+        yaw_deg = quaternion_from_euler(*orientation, axes="sxyz")
+        request.initial_pose.orientation = Quaternion(*yaw_deg)
+
+        # Make the request
+        result = spawn_model_server(request)
+        rospy.loginfo("{}: {}".format(robot.get("robot_id"), result))
+
+
+if __name__ == "__main__":
+    try:
+        rospy.init_node("scenario_setup")
+        result = spawn_robots()
+    except rospy.ROSInterruptException:
+        print("program interrupted before completion", file=sys.stderr)
